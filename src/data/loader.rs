@@ -36,7 +36,10 @@ impl DocumentSource for DocxLoader {
         {
             let entry = entry?;
             let path  = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("docx") {
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.extension().and_then(|e| e.to_str()) == Some("docx")
+                && !file_name.starts_with("~$")
+            {
                 match load_single_docx(&path) {
                     Ok(doc) => {
                         tracing::info!("Loaded: {} ({} chars)", doc.source, doc.text.len());

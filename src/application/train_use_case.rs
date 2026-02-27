@@ -82,7 +82,7 @@ impl TrainUseCase {
                         let start_pos  = (ctx_start + before_enc.get_ids().len()).min(seq_len.saturating_sub(1));
                         let ans_enc = tokenizer.encode(answer_text, false).unwrap();
                         let end_pos = (start_pos + ans_enc.get_ids().len().max(1) - 1).min(seq_len.saturating_sub(1));
-                        let mut input_ids: Vec<u32> = ids[..seq_len].iter().map(|&x| x).collect();
+                        let mut input_ids: Vec<u32> = ids[..seq_len].to_vec();
                         let mut attention: Vec<u32> = vec![1u32; seq_len];
                         while input_ids.len() < cfg.max_seq_len { input_ids.push(0); attention.push(0); }
                         samples.push(QaSample { input_ids, attention_mask: attention, start_position: start_pos, end_position: end_pos });
@@ -141,7 +141,7 @@ fn build_synthetic_samples(chunks: &[String], tokenizer: &tokenizers::Tokenizer,
             if seq_len < 4 { continue; }
             let start = rng.gen_range(1..seq_len.saturating_sub(1));
             let end   = (start + rng.gen_range(1..5)).min(seq_len - 1);
-            let mut input_ids: Vec<u32> = ids[..seq_len].iter().map(|&x| x).collect();
+            let mut input_ids: Vec<u32> = ids[..seq_len].to_vec();
             let mut attention: Vec<u32> = vec![1u32; seq_len];
             while input_ids.len() < cfg.max_seq_len { input_ids.push(0); attention.push(0); }
             samples.push(QaSample { input_ids, attention_mask: attention, start_position: start, end_position: end });

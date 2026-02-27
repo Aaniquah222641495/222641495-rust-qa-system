@@ -71,7 +71,9 @@ impl Inferencer {
         let output      = self.model.forward(input_tensor);
         let start_logits = output.start_logits.squeeze::<1>();
         let end_logits   = output.end_logits.squeeze::<1>();
+        #[allow(clippy::single_range_in_vec_init)]
         let start_logits = start_logits.slice([0..seq_len]);
+        #[allow(clippy::single_range_in_vec_init)]
         let end_logits   = end_logits.slice([0..seq_len]);
 
         // Softmax probabilities
@@ -88,7 +90,9 @@ impl Inferencer {
         let mut best_start = context_start;
         let mut best_end   = context_start;
 
+        #[allow(clippy::needless_range_loop)]
         for s in context_start..seq_len {
+            #[allow(clippy::needless_range_loop)]
             for e in s..(s + MAX_ANSWER_LEN).min(seq_len) {
                 let score = start_probs[s] * end_probs[e];
                 if score > best_score {

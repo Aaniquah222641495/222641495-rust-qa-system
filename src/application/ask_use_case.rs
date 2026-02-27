@@ -15,7 +15,6 @@ use crate::domain::traits::DocumentSource;
 use crate::infra::{checkpoint::CheckpointManager, tokenizer_store::TokenizerStore};
 use crate::ml::inferencer::Inferencer;
 
-const CONFIDENCE_THRESHOLD: f32 = 0.0001;
 
 pub struct AskUseCase {
     checkpoint_dir: String,
@@ -81,14 +80,12 @@ impl AskUseCase {
 
         // Run model inference to find best chunk
         let mut best_confidence = 0.0f32;
-        let mut best_chunk      = String::new();
 
         for (_source, context) in &top_chunks {
             match self.inferencer.predict(question, context, &self.tokenizer) {
                 Ok((_answer, confidence)) => {
                     if confidence > best_confidence {
                         best_confidence = confidence;
-                        best_chunk      = context.clone();
                     }
                 }
                 Err(e) => tracing::warn!("Inference error: {e}"),
@@ -96,13 +93,6 @@ impl AskUseCase {
         }
 
         tracing::info!("Best confidence score: {:.4}", best_confidence);
-
-        // Extract clean answer from best chunk (currently disabled — always uses fallback)
-        if false && best_confidence >= CONFIDENCE_THRESHOLD && !best_chunk.is_empty() {
-            if let Some((answer, _)) = extract_clean_answer(question, &best_chunk) {
-                return Ok(answer);
-            }
-        }
 
         // Collect answers from all top chunks and return the highest-scoring one.
         // This avoids returning a low-confidence partial match (e.g. a planning
@@ -152,9 +142,9 @@ fn extract_year(question: &str) -> Option<&str> {
 }
 
 /// Rank chunks by keyword overlap with question
-fn rank_chunks<'a>(
+fn rank_chunks(
     question: &str,
-    chunks:   &'a [(String, String)],
+    chunks:   &[(String, String)],
     top_k:    usize,
 ) -> Vec<(String, String)> {
     let q_words: Vec<String> = question.split_whitespace()
@@ -213,7 +203,7 @@ fn extract_clean_answer(question: &str, chunk: &str) -> Option<(String, i32)> {
     // Split on pipe (and newline if any); no upper length filter —
     // the chunk may be one long flat string with no newlines.
     let segments: Vec<&str> = chunk
-        .split(|c| c == '\n' || c == '|')
+        .split(['\n', '|'])
         .map(|s| s.trim())
         .filter(|s| s.len() > 2)
         .collect();
@@ -241,7 +231,7 @@ fn extract_clean_answer(question: &str, chunk: &str) -> Option<(String, i32)> {
         }
     }
 
-    let Some(idx) = best_idx else { return None; };
+    let idx = best_idx?;
 
     // --- Day extraction ---
     // The day number can be:
@@ -253,13 +243,13 @@ fn extract_clean_answer(question: &str, chunk: &str) -> Option<(String, i32)> {
     let day_from_self: Option<String> = segments[idx]
         .split_whitespace()
         .find(|w| parse_day(w).is_some())
-        .and_then(|w| parse_day(w));
+        .and_then(parse_day);
 
     let day_from_prev: Option<String> = if idx > 0 {
         segments[idx - 1]
             .split_whitespace()
             .last()
-            .and_then(|w| parse_day(w))
+            .and_then(parse_day)
     } else {
         None
     };

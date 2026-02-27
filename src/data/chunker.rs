@@ -93,7 +93,7 @@ impl Chunker {
             return 0;
         }
         let stride = self.chunk_size.saturating_sub(self.overlap);
-        (word_count + stride - 1) / stride
+        word_count.div_ceil(stride)
     }
 }
 
