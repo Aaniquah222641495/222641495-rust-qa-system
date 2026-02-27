@@ -1,238 +1,151 @@
 // ============================================================
-// Layer 2 — TrainUseCase
+// Layer 2 — Train Use Case
 // ============================================================
-// Orchestrates the full training pipeline in order:
-//
-//   Step 1: Load .docx files          (Layer 4 - data)
-//   Step 2: Clean the text            (Layer 4 - data)
-//   Step 3: Chunk into passages       (Layer 4 - data)
-//   Step 4: Build tokenizer           (Layer 6 - infra)
-//   Step 5: Create training samples   (Layer 4 - data)
-//   Step 6: Split train/validation    (Layer 4 - data)
-//   Step 7: Build datasets            (Layer 4 - data)
-//   Step 8: Save config               (Layer 6 - infra)
-//   Step 9: Run training loop         (Layer 5 - ml)
-//
-// Reference: Rust Book §13 (Iterators and Closures)
-//            Burn Book §5 (Training)
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-
 use crate::data::{
-    loader::DocxLoader,
-    preprocessor::Preprocessor,
     chunker::Chunker,
-    dataset::QaSample,
-    dataset::QaDataset,
+    dataset::{QaDataset, QaSample},
+    loader::DocxLoader,
     splitter::split_train_val,
 };
+use crate::domain::traits::DocumentSource;
+use crate::infra::{checkpoint::CheckpointManager, tokenizer_store::TokenizerStore};
 use crate::ml::trainer::run_training;
-use crate::infra::{
-    tokenizer_store::TokenizerStore,
-    checkpoint::CheckpointManager,
-};
 
-// ─── Training Configuration ──────────────────────────────────────────────────
-// All hyperparameters for a training run.
-// Serialisable so it can be saved to disk and reloaded for inference.
-// The #[derive(Serialize, Deserialize)] macros from serde handle
-// reading/writing this struct to JSON automatically.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainConfig {
-    pub docs_dir:       String,
-    pub checkpoint_dir: String,
+    pub vocab_size:     usize,
     pub max_seq_len:    usize,
-    pub batch_size:     usize,
-    pub epochs:         usize,
-    pub lr:             f64,
     pub d_model:        usize,
     pub num_heads:      usize,
     pub num_layers:     usize,
     pub d_ff:           usize,
     pub dropout:        f64,
-    pub vocab_size:     usize,
+    pub batch_size:     usize,
+    pub epochs:         usize,
+    pub lr:             f64,
+    pub docs_dir:       String,
+    pub checkpoint_dir: String,
 }
 
 impl Default for TrainConfig {
     fn default() -> Self {
         Self {
-            docs_dir:       "data/docx_files".to_string(),
+            vocab_size: 30522, max_seq_len: 512, d_model: 256,
+            num_heads: 8, num_layers: 6, d_ff: 1024, dropout: 0.1,
+            batch_size: 8, epochs: 10, lr: 2e-4,
+            docs_dir: "data/docx_files".to_string(),
             checkpoint_dir: "checkpoints".to_string(),
-            max_seq_len:    512,
-            batch_size:     8,
-            epochs:         10,
-            lr:             2e-4,
-            d_model:        256,
-            num_heads:      8,
-            num_layers:     6,
-            d_ff:           1024,
-            dropout:        0.1,
-            vocab_size:     30522,
         }
     }
 }
 
-// ─── TrainUseCase ─────────────────────────────────────────────────────────────
-// Owns the config and runs the full training pipeline.
-pub struct TrainUseCase {
-    config: TrainConfig,
-}
+pub struct TrainUseCase { cfg: TrainConfig }
 
 impl TrainUseCase {
-    /// Create a new TrainUseCase with the given configuration
-    pub fn new(config: TrainConfig) -> Self {
-        Self { config }
-    }
+    pub fn new(cfg: TrainConfig) -> Self { Self { cfg } }
 
-    /// Execute the full training pipeline end to end
-    pub fn execute(&self) -> Result<()> {
-        let cfg = &self.config;
-
-        // ── Step 1: Load all .docx documents ─────────────────────────────────
-        // DocxLoader walks the directory and parses each .docx file
+    pub fn execute(self) -> Result<()> {
+        let cfg = &self.cfg;
         tracing::info!("Loading .docx files from '{}'", cfg.docs_dir);
-        let loader   = DocxLoader::new(&cfg.docs_dir);
-        let raw_docs = loader.load_all()?;
-        tracing::info!("Loaded {} documents", raw_docs.len());
+        let loader = DocxLoader::new(&cfg.docs_dir);
+        let docs   = loader.load_all()?;
+        tracing::info!("Loaded {} documents", docs.len());
 
-        // ── Step 2: Clean / normalise text ────────────────────────────────────
-        // Removes extra whitespace, control characters, etc.
-        let preprocessor = Preprocessor::new();
-        let clean_docs: Vec<String> = raw_docs
-            .iter()
-            .map(|d| preprocessor.clean(&d.text))
-            .collect();
-
-        // ── Step 3: Chunk documents into context windows ──────────────────────
-        // Long documents are split into overlapping passages.
-        // chunk_size = half of max_seq_len, overlap = 50 words
-        // This ensures answer spans are never cut off at boundaries.
         let chunker = Chunker::new(cfg.max_seq_len / 2, 50);
-        let chunks: Vec<String> = clean_docs
-            .iter()
-            .flat_map(|doc| chunker.chunk(doc))
-            .collect();
+        let chunks: Vec<String> = docs.iter().flat_map(|d| chunker.chunk(&d.text)).collect();
         tracing::info!("Created {} context chunks", chunks.len());
 
-        // ── Step 4: Build / load tokenizer ────────────────────────────────────
-        // If a tokenizer was already trained and saved, load it.
-        // Otherwise train a new BPE tokenizer on the document corpus.
-        let tok_store  = TokenizerStore::new(&cfg.checkpoint_dir);
-        let tokenizer  = tok_store.load_or_build(&chunks, cfg.vocab_size)?;
+        let all_texts: Vec<String> = docs.iter().map(|d| d.text.clone()).collect();
+        let tok_store = TokenizerStore::new(&cfg.checkpoint_dir);
+        let tokenizer = tok_store.load_or_build(&all_texts, cfg.vocab_size)?;
 
-        // ── Step 5: Build training samples ────────────────────────────────────
-        // Creates (input_ids, attention_mask, start_pos, end_pos) tuples
-        // from the document chunks.
-        let samples = build_synthetic_samples(&chunks, &tokenizer, cfg)?;
+        let real_pairs = real_qa_pairs();
+        let mut samples: Vec<QaSample> = Vec::new();
+
+        for chunk in &chunks {
+            let chunk_lower = chunk.to_lowercase();
+            for (question, answer) in &real_pairs {
+                let answer_lower = answer.to_lowercase();
+                if let Some(char_pos) = chunk_lower.find(&answer_lower) {
+                    let context_before = &chunk[..char_pos];
+                    let answer_text    = &chunk[char_pos..char_pos + answer.len()];
+                    let input = format!("[CLS] {} [SEP] {} [SEP]", question, chunk);
+                    if let Ok(encoding) = tokenizer.encode(input.as_str(), false) {
+                        let ids     = encoding.get_ids();
+                        let seq_len = ids.len().min(cfg.max_seq_len);
+                        let q_input   = format!("[CLS] {} [SEP]", question);
+                        let q_enc     = tokenizer.encode(q_input.as_str(), false).unwrap();
+                        let ctx_start = q_enc.get_ids().len();
+                        let before_enc = tokenizer.encode(context_before, false).unwrap();
+                        let start_pos  = (ctx_start + before_enc.get_ids().len()).min(seq_len.saturating_sub(1));
+                        let ans_enc = tokenizer.encode(answer_text, false).unwrap();
+                        let end_pos = (start_pos + ans_enc.get_ids().len().max(1) - 1).min(seq_len.saturating_sub(1));
+                        let mut input_ids: Vec<u32> = ids[..seq_len].iter().map(|&x| x).collect();
+                        let mut attention: Vec<u32> = vec![1u32; seq_len];
+                        while input_ids.len() < cfg.max_seq_len { input_ids.push(0); attention.push(0); }
+                        samples.push(QaSample { input_ids, attention_mask: attention, start_position: start_pos, end_position: end_pos });
+                    }
+                }
+            }
+        }
+
+        if samples.is_empty() {
+            tracing::warn!("No real Q&A pairs matched — using synthetic fallback");
+            samples = build_synthetic_samples(&chunks, &tokenizer, cfg);
+        }
+
         tracing::info!("Built {} training samples", samples.len());
-
-        // ── Step 6: Train / validation split (80/20) ──────────────────────────
-        // Shuffle and split so the model is evaluated on unseen data
         let (train_samples, val_samples) = split_train_val(samples, 0.8);
-        tracing::info!(
-            "Split: {} train, {} validation",
-            train_samples.len(),
-            val_samples.len()
-        );
+        tracing::info!("Split: {} train, {} validation", train_samples.len(), val_samples.len());
 
-        // ── Step 7: Build Burn datasets ───────────────────────────────────────
-        // QaDataset implements Burn's Dataset trait so the DataLoader
-        // can call .get(index) and .len() on it
         let train_dataset = QaDataset::new(train_samples);
         let val_dataset   = QaDataset::new(val_samples);
-
-        // ── Step 8: Save config for inference ─────────────────────────────────
-        // The inferencer needs to know the model architecture to rebuild it
-        let ckpt_manager = CheckpointManager::new(&cfg.checkpoint_dir);
+        let ckpt_manager  = CheckpointManager::new(&cfg.checkpoint_dir);
         ckpt_manager.save_config(cfg)?;
-
-        // ── Step 9: Run training loop (Layer 5) ───────────────────────────────
-        run_training(cfg, train_dataset, val_dataset, ckpt_manager)?;
-
-        Ok(())
+        run_training(cfg, train_dataset, val_dataset, ckpt_manager)
     }
 }
 
-// ─── Synthetic Sample Generation ─────────────────────────────────────────────
-// In production you would load a labelled SQuAD-format dataset.
-// Here we generate synthetic (question, context, start, end) triples
-// from document chunks to demonstrate the full pipeline end-to-end.
-// Each chunk becomes a context, and a random span within it becomes
-// the "answer" with a placeholder question.
-fn build_synthetic_samples(
-    chunks:    &[String],
-    tokenizer: &tokenizers::Tokenizer,
-    cfg:       &TrainConfig,
-) -> Result<Vec<QaSample>> {
-    use rand::Rng;
-    let mut rng     = rand::thread_rng();
+fn real_qa_pairs() -> Vec<(String, String)> {
+    vec![
+        ("When is the Senate meeting in November 2026?".to_string(), "Senate".to_string()),
+        ("When does the academic year start in 2026?".to_string(), "January".to_string()),
+        ("When is the Autumn Graduation in 2026?".to_string(), "April".to_string()),
+        ("When does Term 1 start in 2026?".to_string(), "START OF TERM".to_string()),
+        ("When does Term 2 start in 2025?".to_string(), "START OF TERM".to_string()),
+        ("When does Term 1 start in 2025?".to_string(), "January".to_string()),
+        ("When is Workers Day in 2025?".to_string(), "WORKERS DAY".to_string()),
+        ("When is Heritage Day in 2025?".to_string(), "HERITAGE DAY".to_string()),
+        ("When does Term 2 start in 2024?".to_string(), "START OF TERM".to_string()),
+        ("When is Workers Day in 2024?".to_string(), "WORKERS DAY".to_string()),
+        ("When is Heritage Day in 2024?".to_string(), "HERITAGE DAY".to_string()),
+        ("When is Good Friday in 2024?".to_string(), "GOOD FRIDAY".to_string()),
+        ("When is Day of Reconciliation?".to_string(), "DAY OF RECONCILIATION".to_string()),
+        ("When does Quality Month start?".to_string(), "Quality Month".to_string()),
+        ("When is the Higher Degrees Committee meeting?".to_string(), "Higher Degrees Committee".to_string()),
+        ("When is the Management Committee meeting?".to_string(), "Management Committee".to_string()),
+    ]
+}
+
+fn build_synthetic_samples(chunks: &[String], tokenizer: &tokenizers::Tokenizer, cfg: &TrainConfig) -> Vec<QaSample> {
+    use rand::{Rng, SeedableRng};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
     let mut samples = Vec::new();
-
     for chunk in chunks {
-        // Tokenise the context passage
-        let enc = tokenizer
-            .encode(chunk.as_str(), false)
-            .map_err(|e| anyhow::anyhow!("Tokenisation error: {e}"))?;
-        let context_ids: Vec<u32> = enc.get_ids().to_vec();
-
-        // Skip chunks that are too short to form a meaningful sample
-        if context_ids.len() < 10 {
-            continue;
+        let input = format!("[CLS] question [SEP] {} [SEP]", chunk);
+        if let Ok(enc) = tokenizer.encode(input.as_str(), false) {
+            let ids = enc.get_ids();
+            let seq_len = ids.len().min(cfg.max_seq_len);
+            if seq_len < 4 { continue; }
+            let start = rng.gen_range(1..seq_len.saturating_sub(1));
+            let end   = (start + rng.gen_range(1..5)).min(seq_len - 1);
+            let mut input_ids: Vec<u32> = ids[..seq_len].iter().map(|&x| x).collect();
+            let mut attention: Vec<u32> = vec![1u32; seq_len];
+            while input_ids.len() < cfg.max_seq_len { input_ids.push(0); attention.push(0); }
+            samples.push(QaSample { input_ids, attention_mask: attention, start_position: start, end_position: end });
         }
-
-        // Pick a random answer span within the context
-        let max_start = context_ids.len().saturating_sub(5);
-        let start     = rng.gen_range(0..max_start);
-        let end       = (start + rng.gen_range(1..5)).min(context_ids.len() - 1);
-
-        // Create a placeholder question from the span positions
-        let question = format!("What is mentioned at position {} to {}?", start, end);
-        let q_enc    = tokenizer
-            .encode(question.as_str(), false)
-            .map_err(|e| anyhow::anyhow!("Tokenisation error: {e}"))?;
-        let question_ids: Vec<u32> = q_enc.get_ids().to_vec();
-
-        // Build the full input sequence:
-        // [CLS] question tokens [SEP] context tokens [SEP]
-        // This is the standard BERT input format for extractive Q&A
-        let cls_id = 101u32; // [CLS] token id
-        let sep_id = 102u32; // [SEP] token id
-
-        let mut input_ids = vec![cls_id];
-        input_ids.extend_from_slice(&question_ids);
-        input_ids.push(sep_id);
-
-        // Record where context starts (used to offset the answer span)
-        let context_offset = input_ids.len();
-        input_ids.extend_from_slice(&context_ids);
-        input_ids.push(sep_id);
-
-        // Truncate to maximum allowed length
-        input_ids.truncate(cfg.max_seq_len);
-
-        // Convert relative span positions to absolute positions
-        // in the full [CLS]+Q+[SEP]+C+[SEP] sequence
-        let abs_start = (context_offset + start).min(cfg.max_seq_len - 1);
-        let abs_end   = (context_offset + end  ).min(cfg.max_seq_len - 1);
-
-        // Attention mask: 1 for real tokens, 0 for padding
-        let seq_len         = input_ids.len();
-        let mut attn_mask   = vec![1u32; seq_len];
-
-        // Pad both input_ids and attention_mask to max_seq_len
-        while input_ids.len() < cfg.max_seq_len {
-            input_ids.push(0);  // 0 = [PAD] token
-            attn_mask.push(0);  // 0 = ignore this position
-        }
-
-        samples.push(QaSample {
-            input_ids:      input_ids,
-            attention_mask: attn_mask,
-            start_position: abs_start,
-            end_position:   abs_end,
-        });
     }
-
-    Ok(samples)
+    samples
 }

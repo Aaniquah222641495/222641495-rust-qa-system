@@ -1,0 +1,18 @@
+# Build artifacts
+target/
+
+# Model checkpoints (large binary files)
+checkpoints/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
+
+# Editor temp files
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Lock files from Word
+data/docx_files/~$*

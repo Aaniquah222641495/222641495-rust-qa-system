@@ -83,27 +83,6 @@ pub struct TrainArgs {
     pub vocab_size: usize,
 }
 
-/// Convert CLI TrainArgs into the application-layer TrainConfig.
-/// This is the boundary between Layer 1 and Layer 2 —
-/// the application layer never sees clap types.
-impl From<TrainArgs> for TrainConfig {
-    fn from(a: TrainArgs) -> Self {
-        TrainConfig {
-            docs_dir:       a.docs_dir,
-            checkpoint_dir: a.checkpoint_dir,
-            max_seq_len:    a.max_seq_len,
-            batch_size:     a.batch_size,
-            epochs:         a.epochs,
-            lr:             a.lr,
-            d_model:        a.d_model,
-            num_heads:      a.num_heads,
-            num_layers:     a.num_layers,
-            d_ff:           a.d_ff,
-            dropout:        a.dropout,
-            vocab_size:     a.vocab_size,
-        }
-    }
-}
 
 /// All arguments for the `ask` command
 #[derive(Args, Debug)]

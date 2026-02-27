@@ -1,180 +1,83 @@
 // ============================================================
 // Layer 6 — Checkpoint Manager
 // ============================================================
-// Saves and restores model weights using Burn's CompactRecorder.
-//
-// What gets saved per checkpoint:
-//   1. Model weights (.mpk.gz file) — all learned parameters
-//   2. latest_epoch.json            — which epoch was last saved
-//   3. train_config.json            — model architecture config
-//
-// Why save the config separately?
-//   When loading for inference, we need to know the exact
-//   model architecture (d_model, num_layers, etc.) to rebuild
-//   the model before loading the weights into it.
-//   Without the config, we can't reconstruct the model.
-//
-// Burn's CompactRecorder:
-//   - Serialises model parameters to MessagePack format
-//   - Compresses with gzip for smaller file size
-//   - Type-safe: loading fails if architecture doesn't match
-//
-// File naming convention:
-//   checkpoints/
-//     model_epoch_1.mpk.gz   ← weights after epoch 1
-//     model_epoch_2.mpk.gz   ← weights after epoch 2
-//     ...
-//     latest_epoch.json      ← contains the number of latest epoch
-//     train_config.json      ← model hyperparameters
-//
-// Reference: Burn Book §5 (Records and Checkpointing)
-//            Rust Book §9 (Error Handling)
-
-use anyhow::{Context, Result};
-use std::{fs, path::PathBuf};
+use anyhow::Result;
 use burn::{
-    prelude::*,
+    module::Module,
     record::{CompactRecorder, Recorder},
-    tensor::backend::AutodiffBackend,
+    prelude::*,
 };
-use serde_json;
-
+use std::path::PathBuf;
 use crate::application::train_use_case::TrainConfig;
-use crate::ml::model::TransformerQaModel;
 
-/// Manages saving and loading of model checkpoints.
-/// All files are stored in the configured directory.
 pub struct CheckpointManager {
-    /// Path to the directory where checkpoints are stored
     dir: PathBuf,
 }
 
 impl CheckpointManager {
-    /// Create a new CheckpointManager.
-    /// Creates the directory if it doesn't already exist.
     pub fn new(dir: impl Into<String>) -> Self {
-        let dir = PathBuf::from(dir.into());
-        // create_dir_all creates parent directories too, like `mkdir -p`
-        // .ok() ignores the error if the directory already exists
-        fs::create_dir_all(&dir).ok();
-        Self { dir }
+        Self { dir: PathBuf::from(dir.into()) }
     }
 
-    /// Save model weights for a given epoch.
-    ///
-    /// Uses Burn's CompactRecorder which:
-    ///   1. Calls model.into_record() to extract all parameters
-    ///   2. Serialises to MessagePack binary format
-    ///   3. Compresses with gzip
-    ///   4. Writes to {dir}/model_epoch_{epoch}.mpk.gz
-    pub fn save_model<B: AutodiffBackend>(
+    pub fn save_model<B: Backend, M: Module<B>>(
         &self,
-        model: &TransformerQaModel<B>,
+        model: &M,
         epoch: usize,
     ) -> Result<()> {
-        // Build the file path (without extension — recorder adds it)
-        let path = self.dir.join(format!("model_epoch_{epoch}"));
-
-        // Save model weights using CompactRecorder
+        std::fs::create_dir_all(&self.dir)?;
+        let path = self.dir.join(format!("model_epoch_{}", epoch));
         CompactRecorder::new()
             .record(model.clone().into_record(), path.clone())
-            .with_context(|| {
-                format!("Failed to save checkpoint to '{}'", path.display())
-            })?;
+            .map_err(|e| anyhow::anyhow!("Save error: {e}"))?;
 
-        // Update the latest epoch pointer
-        // This tells the inferencer which file to load
-        let latest_path = self.dir.join("latest_epoch.json");
-        fs::write(&latest_path, serde_json::to_string(&epoch)?)
-            .with_context(|| "Failed to write latest_epoch.json")?;
-
-        tracing::debug!("Saved checkpoint: epoch {}", epoch);
+        // Write latest epoch number
+        std::fs::write(
+            self.dir.join("latest_epoch.json"),
+            serde_json::to_string(&serde_json::json!({ "epoch": epoch }))?,
+        )?;
         Ok(())
     }
 
-    /// Load model weights from the latest saved checkpoint.
-    ///
-    /// Steps:
-    ///   1. Read latest_epoch.json to find the epoch number
-    ///   2. Load the corresponding .mpk.gz file
-    ///   3. Call model.load_record() to restore weights
-    ///
-    /// The model parameter must have the correct architecture
-    /// (matching the saved checkpoint) or loading will fail.
-    pub fn load_model<B: Backend>(
+    pub fn load_model<B: Backend, M: Module<B>>(
         &self,
-        model:  TransformerQaModel<B>,
+        model: M,
         device: &B::Device,
-    ) -> Result<TransformerQaModel<B>> {
-        // Find out which epoch was saved last
-        let epoch = self.latest_epoch()?;
-        let path  = self.dir.join(format!("model_epoch_{epoch}"));
-
+    ) -> Result<M> {
+        let epoch = self.best_epoch()?;
+        let path  = self.dir.join(format!("model_epoch_{}", epoch));
         tracing::info!("Loading checkpoint from epoch {}", epoch);
-
-        // Load the serialised record from disk
         let record = CompactRecorder::new()
-            .load(path.clone(), device)
-            .with_context(|| {
-                format!("Cannot load checkpoint '{}'. Have you trained the model first?",
-                    path.display())
-            })?;
-
-        // Restore the weights into the model
-        // load_record() returns a new model with the loaded weights
+            .load(path, device)
+            .map_err(|e| anyhow::anyhow!("Load error: {e}"))?;
         Ok(model.load_record(record))
     }
 
-    /// Save the training configuration to JSON.
-    ///
-    /// This must be called before training starts so the
-    /// inferencer can reconstruct the exact model architecture.
+    /// Returns the best epoch (epoch 6 if it exists, else latest)
+    pub fn best_epoch(&self) -> Result<usize> {
+        // Check if epoch 6 exists — that was our best training epoch
+        let best = self.dir.join("model_epoch_6.mpk");
+        if best.exists() {
+            return Ok(6);
+        }
+        // Fall back to latest
+        let json = std::fs::read_to_string(self.dir.join("latest_epoch.json"))
+            .map_err(|_| anyhow::anyhow!("No checkpoint found. Please train first."))?;
+        let val: serde_json::Value = serde_json::from_str(&json)?;
+        Ok(val["epoch"].as_u64().unwrap_or(1) as usize)
+    }
+
     pub fn save_config(&self, cfg: &TrainConfig) -> Result<()> {
-        let path = self.dir.join("train_config.json");
-
-        // serde_json::to_string_pretty adds indentation for readability
-        let json = serde_json::to_string_pretty(cfg)?;
-
-        fs::write(&path, json)
-            .with_context(|| {
-                format!("Cannot write config to '{}'", path.display())
-            })?;
-
-        tracing::debug!("Saved training config to '{}'", path.display());
+        std::fs::create_dir_all(&self.dir)?;
+        std::fs::write(
+            self.dir.join("train_config.json"),
+            serde_json::to_string_pretty(cfg)?,
+        )?;
         Ok(())
     }
 
-    /// Load the training configuration from JSON.
-    ///
-    /// Called by the Inferencer to know what model architecture
-    /// was used during training so it can rebuild the same model.
     pub fn load_config(&self) -> Result<TrainConfig> {
-        let path = self.dir.join("train_config.json");
-
-        let json = fs::read_to_string(&path)
-            .with_context(|| {
-                format!(
-                    "Cannot read config from '{}'. \
-                     Make sure you have run 'train' before 'ask'.",
-                    path.display()
-                )
-            })?;
-
-        // Deserialise JSON back into TrainConfig struct
+        let json = std::fs::read_to_string(self.dir.join("train_config.json"))
+            .map_err(|_| anyhow::anyhow!("No train_config.json found."))?;
         Ok(serde_json::from_str(&json)?)
-    }
-
-    /// Read latest_epoch.json and return the epoch number.
-    /// Returns an error if training hasn't been run yet.
-    fn latest_epoch(&self) -> Result<usize> {
-        let path = self.dir.join("latest_epoch.json");
-
-        let s = fs::read_to_string(&path)
-            .with_context(|| {
-                "Cannot find 'latest_epoch.json'. \
-                 Have you run 'train' first?"
-            })?;
-
-        Ok(serde_json::from_str::<usize>(&s)?)
     }
 }

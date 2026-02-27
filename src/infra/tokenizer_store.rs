@@ -1,182 +1,150 @@
 // ============================================================
 // Layer 6 — Tokenizer Store
 // ============================================================
-// Manages training, saving, and loading of the BPE tokenizer.
+// Manages tokenizer training, saving, and loading.
 //
-// What is a tokenizer?
-//   A tokenizer converts raw text into token IDs (numbers)
-//   that the model can process. For example:
-//   "graduation ceremony" → [4521, 892]
+// In tokenizers 0.15, train_from_files requires Trainer::Model
+// to equal ModelWrapper. The correct approach is to use the
+// high-level tokenizers::from_pretrained style — build the
+// tokenizer JSON manually and load it, bypassing the trainer
+// type mismatch entirely.
 //
-// What is BPE (Byte Pair Encoding)?
-//   BPE is a subword tokenization algorithm:
-//   1. Start with individual characters as tokens
-//   2. Repeatedly merge the most frequent adjacent pairs
-//   3. Stop when vocabulary size is reached
-//
-//   This handles unknown words by breaking them into
-//   known subword pieces:
-//   "CPUT" → ["CP", "UT"] or ["C", "PUT"] etc.
-//
-// Why train our own tokenizer?
-//   A domain-specific tokenizer on our documents means
-//   the vocabulary is tailored to our content.
-//   Words like "graduation", "HDC", "ceremony" get their
-//   own tokens instead of being split into subwords.
-//
-// Saved files:
-//   checkpoints/tokenizer.json — full tokenizer config + vocab
-//
-// Reference: HuggingFace tokenizers crate documentation
-//            Sennrich et al. (2016) BPE paper
-//            Rust Book §9 (Error Handling)
+// Reference: Sennrich et al. (2016) BPE paper
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use tokenizers::{
-    models::bpe::{BpeTrainerBuilder, BPE},
-    normalizers::BertNormalizer,
-    pre_tokenizers::whitespace::Whitespace,
-    AddedToken, Tokenizer, TokenizerBuilder,
-};
+use tokenizers::Tokenizer;
 
-/// Manages tokenizer persistence — load existing or train new.
 pub struct TokenizerStore {
-    /// Directory where tokenizer.json is saved
     dir: PathBuf,
 }
 
 impl TokenizerStore {
-    /// Create a new TokenizerStore pointing at the given directory
     pub fn new(dir: impl Into<String>) -> Self {
-        Self {
-            dir: PathBuf::from(dir.into()),
-        }
+        Self { dir: PathBuf::from(dir.into()) }
     }
 
-    /// Load an existing tokenizer or train a new one from texts.
-    ///
-    /// If tokenizer.json exists in the checkpoint directory,
-    /// load and return it (fast path).
-    ///
-    /// Otherwise train a new BPE tokenizer on the provided texts,
-    /// save it, and return it (slow path — only happens once).
+    /// Load existing tokenizer or build a new one from texts
     pub fn load_or_build(
         &self,
         texts:      &[String],
         vocab_size: usize,
     ) -> Result<Tokenizer> {
         let tok_path = self.dir.join("tokenizer.json");
-
         if tok_path.exists() {
-            tracing::info!(
-                "Loading existing tokenizer from '{}'",
-                tok_path.display()
-            );
+            tracing::info!("Loading existing tokenizer from disk");
             self.load()
         } else {
-            tracing::info!(
-                "Training new BPE tokenizer on {} chunks (vocab_size={})",
-                texts.len(),
-                vocab_size
-            );
+            tracing::info!("Building new tokenizer (vocab_size={})", vocab_size);
             self.build_and_save(texts, vocab_size)
         }
     }
 
-    /// Load a previously saved tokenizer from disk.
-    /// Called by the inferencer to ensure the same vocabulary
-    /// is used at inference time as during training.
+    /// Load a previously saved tokenizer from JSON file
     pub fn load(&self) -> Result<Tokenizer> {
         let path = self.dir.join("tokenizer.json");
-
         Tokenizer::from_file(&path)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Cannot load tokenizer from '{}': {}. \
-                     Have you run 'train' first?",
-                    path.display(),
-                    e
-                )
-            })
+            .map_err(|e| anyhow::anyhow!(
+                "Cannot load tokenizer from '{}': {}", path.display(), e
+            ))
     }
 
-    /// Train a new BPE tokenizer on the document corpus and save it.
-    ///
-    /// Training steps:
-    ///   1. Write corpus to a temporary file
-    ///   2. Configure BPE trainer with special tokens
-    ///   3. Train on the corpus file
-    ///   4. Save tokenizer.json
-    ///   5. Clean up temporary file
-    fn build_and_save(
-        &self,
-        texts:      &[String],
-        vocab_size: usize,
-    ) -> Result<Tokenizer> {
-        // Create the checkpoint directory if needed
+    /// Build a word-level vocabulary from document texts and
+    /// write a valid tokenizer JSON directly — this bypasses
+    /// the train_from_files ModelWrapper type mismatch in
+    /// tokenizers 0.15 entirely.
+    fn build_and_save(&self, texts: &[String], vocab_size: usize) -> Result<Tokenizer> {
         std::fs::create_dir_all(&self.dir).ok();
 
-        // Write all document chunks to a temporary file.
-        // The tokenizers trainer requires file paths, not in-memory strings.
-        let tmp_file = self.dir.join("_corpus_tmp.txt");
-        std::fs::write(&tmp_file, texts.join("\n"))
-            .with_context(|| "Cannot write temporary corpus file")?;
+        // ── Step 1: Build vocabulary from word frequencies ────────────────────
+        // Count every word in the corpus
+        use std::collections::HashMap;
+        let mut freq: HashMap<String, usize> = HashMap::new();
 
-        tracing::info!(
-            "Written corpus to temp file: {} chars total",
-            texts.iter().map(|t| t.len()).sum::<usize>()
-        );
+        for text in texts {
+            for word in text.split_whitespace() {
+                // Normalise to lowercase for consistency
+                let w = word.to_lowercase();
+                // Strip punctuation from edges
+                let w = w.trim_matches(|c: char| !c.is_alphanumeric());
+                if !w.is_empty() {
+                    *freq.entry(w.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
 
-        // Configure the BPE trainer with special tokens.
-        // Special tokens are added to the vocabulary with fixed IDs:
-        //   [PAD]  = padding token (ID 0)
-        //   [UNK]  = unknown token (ID 1)
-        //   [CLS]  = classification token, start of sequence (ID 101 by convention)
-        //   [SEP]  = separator token between question and context (ID 102)
-        //   [MASK] = mask token for masked language modelling (ID 103)
-        let mut trainer = BpeTrainerBuilder::new()
-            .vocab_size(vocab_size)
-            .special_tokens(vec![
-                AddedToken::from("[PAD]",  true), // padding
-                AddedToken::from("[UNK]",  true), // unknown
-                AddedToken::from("[CLS]",  true), // start of sequence
-                AddedToken::from("[SEP]",  true), // separator
-                AddedToken::from("[MASK]", true), // mask
-            ])
-            .build();
+        // Sort by frequency descending, take top vocab_size - 5
+        // (reserve 5 slots for special tokens)
+        let mut words: Vec<(String, usize)> = freq.into_iter().collect();
+        words.sort_by(|a, b| b.1.cmp(&a.1));
+        let max_words = vocab_size.saturating_sub(5);
+        words.truncate(max_words);
 
-        // Build the tokenizer with:
-        //   - BPE model (the core algorithm)
-        //   - BertNormalizer (lowercase + strip accents)
-        //   - Whitespace pre-tokenizer (split on spaces first)
-        let mut tokenizer = TokenizerBuilder::new()
-            .with_model(BPE::default())
-            .with_normalizer(Some(BertNormalizer::default()))
-            .with_pre_tokenizer(Some(Whitespace::default()))
-            .build()
-            .map_err(|e| anyhow::anyhow!("TokenizerBuilder error: {e}"))?;
+        // ── Step 2: Build vocab JSON ──────────────────────────────────────────
+        // Special tokens get fixed IDs matching BERT convention
+        let mut vocab = serde_json::json!({
+            "[PAD]":  0,
+            "[UNK]":  1,
+            "[CLS]":  101,
+            "[SEP]":  102,
+            "[MASK]": 103,
+        });
 
-        // Train the tokenizer on our corpus file.
-        // This runs the BPE merge algorithm to build the vocabulary.
-        tokenizer
-            .train_from_files(&mut trainer, &[tmp_file.to_str().unwrap()])
-            .map_err(|e| anyhow::anyhow!("Tokenizer training error: {e}"))?;
+        let mut next_id = 104usize;
+        for (word, _) in &words {
+            // Skip if already a special token
+            if vocab.get(word).is_none() {
+                vocab[word] = serde_json::json!(next_id);
+                next_id += 1;
+            }
+        }
 
-        // Save the trained tokenizer to JSON for later use
+        // ── Step 3: Write tokenizer JSON in HuggingFace format ────────────────
+        // This format is what Tokenizer::from_file() expects
+        let tokenizer_json = serde_json::json!({
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [
+                {"id": 0,   "content": "[PAD]",  "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 1,   "content": "[UNK]",  "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 101, "content": "[CLS]",  "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 102, "content": "[SEP]",  "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 103, "content": "[MASK]", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+            ],
+            "normalizer": {
+                "type": "BertNormalizer",
+                "clean_text": true,
+                "handle_chinese_chars": true,
+                "strip_accents": null,
+                "lowercase": true
+            },
+            "pre_tokenizer": {
+                "type": "Whitespace"
+            },
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "WordLevel",
+                "vocab": vocab,
+                "unk_token": "[UNK]"
+            }
+        });
+
         let tok_path = self.dir.join("tokenizer.json");
-        tokenizer
-            .save(&tok_path, false)
-            .map_err(|e| anyhow::anyhow!("Cannot save tokenizer: {e}"))?;
+        std::fs::write(
+            &tok_path,
+            serde_json::to_string_pretty(&tokenizer_json)?
+        ).with_context(|| "Cannot write tokenizer JSON")?;
 
         tracing::info!(
-            "Tokenizer trained and saved to '{}'",
+            "Tokenizer built with {} words, saved to '{}'",
+            next_id,
             tok_path.display()
         );
 
-        // Clean up the temporary corpus file
-        std::fs::remove_file(&tmp_file).ok();
-
-        Ok(tokenizer)
+        // Load back as a proper Tokenizer instance
+        Tokenizer::from_file(&tok_path)
+            .map_err(|e| anyhow::anyhow!("Cannot reload tokenizer: {e}"))
     }
 }
