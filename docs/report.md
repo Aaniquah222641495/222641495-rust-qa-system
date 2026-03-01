@@ -107,43 +107,8 @@ model behaviour.
 The project follows a strict 6-layer Clean Architecture where each
 layer depends only on the layer directly below it.
 
-```
-+-----------------------------------------------------+
-|  Layer 1: CLI (src/cli/)                            |
-|  Commands: train | ask                              |
-|  Uses: clap derive macros                           |
-+--------------------+--------------------------------+
-                     | delegates to
-+--------------------v--------------------------------+
-|  Layer 2: Application (src/application/)            |
-|  TrainUseCase | AskUseCase                          |
-|  Orchestrates all layers, no ML math here           |
-+--------------------+--------------------------------+
-                     | uses domain types
-+--------------------v--------------------------------+
-|  Layer 3: Domain (src/domain/)                      |
-|  Document | QaPair | Traits                         |
-|  Pure Rust, zero framework dependency               |
-+--------------------+--------------------------------+
-                     |
-+--------------------v--------------------------------+
-|  Layer 4: Data (src/data/)                          |
-|  Loader -> Preprocessor -> Chunker                  |
-|  -> Dataset -> Batcher -> Splitter                  |
-+--------------------+--------------------------------+
-                     |
-+--------------------v--------------------------------+
-|  Layer 5: ML Model (src/ml/)                        |
-|  TransformerQaModel (6 encoder layers)              |
-|  Trainer | Inferencer                               |
-+--------------------+--------------------------------+
-                     |
-+--------------------v--------------------------------+
-|  Layer 6: Infrastructure (src/infra/)               |
-|  CheckpointManager | TokenizerStore                 |
-|  MetricsLogger                                      |
-+-----------------------------------------------------+
-```
+<img width="1024" height="1536" alt="ChatGPT Image Mar 2, 2026, 12_10_09 AM" src="https://github.com/user-attachments/assets/0f6b1a31-7643-453c-95d5-868a0bc33e73" />
+
 *Figure 1: 6-Layer Clean Architecture*
 
 ### Key Design Decisions
@@ -308,35 +273,9 @@ Burn's `Batcher` trait and collects samples into
 
 ### 4.1 Architecture Overview
 
-```
-Input: [CLS] question [SEP] context [SEP]
-              |
-    TokenEmbedding(vocab_size=30522 -> d_model=256)
-              +
-    PositionalEmbedding(max_seq_len=512 -> d_model=256)
-              |
-              v
-    +----------------------+
-    |   Encoder Layer 1    |
-    |  +--------------+    |
-    |  | Multi-Head   |    |  heads=8, d_k=32
-    |  | Attention    |    |
-    |  +------+-------+    |
-    |   Add and LayerNorm  |
-    |  +--------------+    |
-    |  | Feed-Forward |    |  Linear(256->1024)->GELU->Linear(1024->256)
-    |  +------+-------+    |
-    |   Add and LayerNorm  |
-    +----------------------+  x 6 layers
-              |
-        Final LayerNorm
-              |
-        Linear(d_model=256 -> 2)
-              |
-    +---------+---------+
-    start_logits      end_logits
-    [batch, seq_len]  [batch, seq_len]
-```
+
+<img width="1024" height="1536" alt="6D233DBE-8B38-4DC1-BCD7-E4D65B5B1C84" src="https://github.com/user-attachments/assets/bdb7bb9f-2dca-4f48-b448-8e2611393dbd" />
+
 *Figure 3: Transformer encoder Q&A model architecture*
 
 ### 4.2 Multi-Head Self-Attention
@@ -581,18 +520,10 @@ if best_score < 0.0001:
 
 *Figure 4: Training and validation loss curve*
 
-```
-Loss
-4.5 |              * * * * * * * * * * * * *
-    |             *
-3.5 |            *
-    |
-2.6 |  * * *
-    |
-1.9 |          *  <- best (epoch 6)
-    +-------------------------------------------> Epoch
-      1  2  3  4  5  6  7  8+
-```
+
+<img width="1536" height="1024" alt="Loss curves for training and validation" src="https://github.com/user-attachments/assets/3925516f-e914-45d9-a551-abec26d4874d" />
+
+
 
 Training time: approx 35 minutes on Apple Silicon (WGPU backend).
 Hardware: Apple M-series chip, 16GB RAM, WGPU backend (GPU-accelerated).
