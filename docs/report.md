@@ -273,35 +273,9 @@ Burn's `Batcher` trait and collects samples into
 
 ### 4.1 Architecture Overview
 
-```
-Input: [CLS] question [SEP] context [SEP]
-              |
-    TokenEmbedding(vocab_size=30522 -> d_model=256)
-              +
-    PositionalEmbedding(max_seq_len=512 -> d_model=256)
-              |
-              v
-    +----------------------+
-    |   Encoder Layer 1    |
-    |  +--------------+    |
-    |  | Multi-Head   |    |  heads=8, d_k=32
-    |  | Attention    |    |
-    |  +------+-------+    |
-    |   Add and LayerNorm  |
-    |  +--------------+    |
-    |  | Feed-Forward |    |  Linear(256->1024)->GELU->Linear(1024->256)
-    |  +------+-------+    |
-    |   Add and LayerNorm  |
-    +----------------------+  x 6 layers
-              |
-        Final LayerNorm
-              |
-        Linear(d_model=256 -> 2)
-              |
-    +---------+---------+
-    start_logits      end_logits
-    [batch, seq_len]  [batch, seq_len]
-```
+
+<img width="1024" height="1536" alt="6D233DBE-8B38-4DC1-BCD7-E4D65B5B1C84" src="https://github.com/user-attachments/assets/bdb7bb9f-2dca-4f48-b448-8e2611393dbd" />
+
 *Figure 3: Transformer encoder Q&A model architecture*
 
 ### 4.2 Multi-Head Self-Attention
