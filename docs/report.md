@@ -3,7 +3,7 @@
 **Module:** SEG 580S: Software Engineering Deep Learning Systems  
 **Student Number:** 222641495  
 **Institution:** Cape Peninsula University of Technology (CPUT)  
-**Date:** March 2026  
+**Date:** 02 February 2026  
 **Repository:** https://github.com/Aaniquah222641495/222641495-rust-qa-system
 
 ---
@@ -472,13 +472,15 @@ lr=2e-4, b1=0.9, b2=0.999, e=1e-8
 
 ### 5.4 Compilation Screenshot
 
-> **[INSERT SCREENSHOT HERE]**
+
+> **<img width="659" height="52" alt="Screenshot 2026-03-01 at 22 40 56" src="https://github.com/user-attachments/assets/d05bc51d-543a-4976-a8cd-76d9b6de02ce" />**
+> 
 > Screenshot of `cargo build --release` completing with no errors or warnings.
 > Command: `cargo build --release 2>&1 | tail -5`
 
 ### 5.5 Training Screenshot
-
-> **[INSERT SCREENSHOT HERE]**
+> **<img width="1308" height="798" alt="Screenshot 2026-03-01 at 23 46 16" src="https://github.com/user-attachments/assets/62c7ec21-5b32-4db6-b5ed-ad34110eed0c" />**
+> 
 > Screenshot of the training loop running, showing epoch output:
 > `Epoch 1/20 | train_loss=3.7701 | val_loss=2.7985 | start_acc=0.0% | end_acc=2.5%`
 
@@ -674,21 +676,26 @@ of span extraction from calendar table data.
 
 **Score: 5/5 questions answered correctly.**
 
+
 ### 7.5 Inference Screenshots
 
-> **[INSERT SCREENSHOT, Q1]**
+> **<img width="1311" height="193" alt="Screenshot 2026-03-01 at 23 22 29" src="https://github.com/user-attachments/assets/22369fb1-b2e8-44b2-a7ee-f4172af8b0c5" />**
+> 
 > Terminal showing: `Answer: 9 December 2026, WCED SCHOOLS CLOSE SUMMER GRADUATION`
 
-> **[INSERT SCREENSHOT, Q2]**
+> **<img width="1311" height="193" alt="Screenshot 2026-03-01 at 23 24 59" src="https://github.com/user-attachments/assets/a598e54b-e8a2-4945-8aac-0d0243b3482b" />**
+> 
 > Terminal showing: `Answer: I don't know based on the documents.`
 
-> **[INSERT SCREENSHOT, Q3]**
+> **<img width="1314" height="193" alt="Screenshot 2026-03-01 at 23 25 23" src="https://github.com/user-attachments/assets/249acc0a-effc-4eae-afc0-9097b9219823" />**
+> 
 > Terminal showing: `Answer: 1 May 2024, WORKERS DAY`
 
-> **[INSERT SCREENSHOT, Q4]**
+> **<img width="1311" height="193" alt="Screenshot 2026-03-01 at 23 25 41" src="https://github.com/user-attachments/assets/1a961a44-f071-4104-a746-eac6a6536775" />**
+> 
 > Terminal showing: `Answer: 29 March 2024, GOOD FRIDAY`
 
-> **[INSERT SCREENSHOT, Q5]**
+> **<img width="1306" height="195" alt="Screenshot 2026-03-01 at 23 25 59" src="https://github.com/user-attachments/assets/cdf63470-9ce8-4852-bd7a-2941fcf7d97b" />**
 > Terminal showing: `Answer: 25 March 2025, START OF TERM 2 Deans and Directors Forum (09:00)`
 
 ### 7.6 What Works Well
@@ -993,16 +1000,6 @@ silent memory bugs in Python or C. By the end of the project I
 was thinking in terms of ownership naturally, using `.clone()`
 only when necessary and passing references when the data did not
 need to be consumed.
-
-**What tokens are:**
-Before this assignment I had never worked with text tokenisation.
-I learned that a token is the smallest unit of text a model can
-process. The sentence "Good Friday" becomes two tokens: ["good",
-"friday"]. The number 29 becomes its own token. The model never
-reads actual words. It reads sequences of integer IDs that
-represent those words. Understanding this was important because
-the whole training process depends on correctly mapping between
-token IDs and positions in the sequence.
 
 **Burn framework and dependency versions:**
 One of the most important practical lessons was learning that
