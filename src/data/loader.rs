@@ -1,10 +1,4 @@
 #![allow(dead_code)]
-// ============================================================
-// Layer 4 — Document Loader
-// ============================================================
-// Loads .docx files extracting text from BOTH paragraphs
-// and tables (calendar grids live in tables).
-
 use anyhow::{Context, Result};
 use std::{fs, path::Path};
 
@@ -58,11 +52,8 @@ fn load_single_docx(path: &Path) -> Result<Document> {
     let bytes = fs::read(path)
         .with_context(|| format!("Cannot read '{}'", path.display()))?;
 
-    // Open the .docx (ZIP) archive and extract word/document.xml.
-    // Using raw ZIP+XML extraction instead of docx-rs text walking because
-    // docx-rs silently drops text inside <mc:AlternateContent> runs (a Word
-    // markup-compatibility wrapper used for rich shapes / text effects).
-    // Our scanner finds every <w:t> at any nesting depth.
+    // Raw ZIP+XML extraction: docx-rs silently drops text inside <mc:AlternateContent>
+    // runs (e.g. "SUMMER GRADUATION"). Direct XML scanning finds every <w:t> at any depth.
     let xml = {
         let cursor  = std::io::Cursor::new(&bytes);
         let mut zip = zip::ZipArchive::new(cursor)
@@ -83,22 +74,10 @@ fn load_single_docx(path: &Path) -> Result<Document> {
     Ok(Document::new(source, text))
 }
 
-/// Extract document text from raw OOXML, preserving table structure.
-///
-/// Strategy:
-///  - Paragraphs outside tables → text joined with ""  per paragraph, rows with "\n"
-///  - Table rows                 → cells joined with " | ", rows with "\n"
-///  - All `<w:t>` elements are collected regardless of nesting depth
-///    (catches text inside `<mc:AlternateContent>`, drawings, shapes, etc.)
-///
-/// We avoid a full XML parser to keep the dependency footprint small; a
-/// simple linear scan is sufficient for well-formed OOXML.
+/// Scan OOXML, emitting paragraphs and table rows (cells joined with " | ").
 fn extract_text_from_xml(xml: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    // Collect all tag/text tokens in one forward pass.
-    // tag() returns the element name without namespace prefix and without
-    // attributes, e.g. "<w:tr …>"  → "tr",  "</w:tc>" → "/tc".
     let tokens: Vec<&str> = {
         let mut v   = Vec::new();
         let mut pos = 0;
@@ -120,27 +99,23 @@ fn extract_text_from_xml(xml: &str) -> String {
         v
     };
 
-    // State ───────────────────────────────────────────────────────────────
-    let mut in_table       = 0usize; // nesting depth for <w:tbl>
-    let mut in_cell        = false;
-    let mut in_p_in_cell   = false;  // inside a <p> within a table cell
-    let mut in_t           = false;  // inside <w:t>
-    // Skip text inside <mc:Choice> — we want the <mc:Fallback> version only.
-    // This prevents double-counting when AlternateContent has both a rich Choice
-    // and a plain-text Fallback (e.g. "SUMMER GRADUATION" appearing twice).
-    let mut in_choice      = 0usize;
+    let mut in_table     = 0usize; // nesting depth for <w:tbl>
+    let mut in_cell      = false;
+    let mut in_p_in_cell = false;  // inside a <p> within a table cell
+    let mut in_t         = false;
+    // Skip <w:t> inside <mc:Choice> — only capture <mc:Fallback> to avoid
+    // double-counting text that appears in both branches.
+    let mut in_choice    = 0usize;
 
-    // Text buffers
-    let mut para_buf       = String::new(); // paragraph text OUTSIDE tables
-    let mut para_in_cell   = String::new(); // paragraph text INSIDE a cell (runs joined without space)
-    let mut cell_buf       = String::new(); // paragraphs within a cell (joined with " ")
+    let mut para_buf     = String::new();
+    let mut para_in_cell = String::new(); // runs within one in-cell paragraph (no space between)
+    let mut cell_buf     = String::new(); // paragraphs within a cell (joined with " ")
     let mut row_cells: Vec<String> = Vec::new();
 
     for tok in &tokens {
         if tok.starts_with('<') {
             let name = xml_tag_name(tok);
 
-            // ── AlternateContent Choice tracking ─────────────────────────
             if name == "Choice" && !tok.starts_with("</") {
                 in_choice += 1;
                 continue;
@@ -149,7 +124,6 @@ fn extract_text_from_xml(xml: &str) -> String {
                 continue;
             }
 
-            // ── Table structure ───────────────────────────────────────────
             if name == "tbl" && !tok.starts_with("</") {
                 in_table += 1;
             } else if name == "tbl" && tok.starts_with("</") {
@@ -158,7 +132,6 @@ fn extract_text_from_xml(xml: &str) -> String {
             } else if xml_is_open(tok, "tr") && in_table > 0 {
                 row_cells = Vec::new();
             } else if xml_is_close(tok, "tr") && in_table > 0 {
-                // Flush any open cell/paragraph
                 if in_p_in_cell {
                     let t = para_in_cell.trim().to_string();
                     if !t.is_empty() {
@@ -183,7 +156,6 @@ fn extract_text_from_xml(xml: &str) -> String {
                 in_cell       = true;
                 cell_buf      = String::new();
             } else if xml_is_close(tok, "tc") && in_table > 0 {
-                // Flush last paragraph in cell
                 if in_p_in_cell {
                     let t = para_in_cell.trim().to_string();
                     if !t.is_empty() {
@@ -199,7 +171,6 @@ fn extract_text_from_xml(xml: &str) -> String {
                 cell_buf = String::new();
                 in_cell  = false;
 
-            // ── Paragraphs inside cells ───────────────────────────────────
             } else if xml_is_open(tok, "p") && in_cell {
                 in_p_in_cell = true;
                 para_in_cell = String::new();
@@ -212,7 +183,6 @@ fn extract_text_from_xml(xml: &str) -> String {
                 para_in_cell = String::new();
                 in_p_in_cell = false;
 
-            // ── Paragraphs outside tables ─────────────────────────────────
             } else if xml_is_open(tok, "p") && in_table == 0 {
                 para_buf = String::new();
             } else if xml_is_close(tok, "p") && in_table == 0 {
@@ -221,22 +191,19 @@ fn extract_text_from_xml(xml: &str) -> String {
                 }
                 para_buf = String::new();
 
-            // ── Text element ──────────────────────────────────────────────
             } else if name == "t" && !tok.starts_with("</") {
                 in_t = true;
             } else if xml_is_close(tok, "t") {
                 in_t = false;
             }
         } else if in_t && in_choice == 0 {
-            // Text content of <w:t>; skip if inside <mc:Choice> (prefer Fallback).
-            // Runs within a paragraph are joined directly (no extra space) so that
-            // numbers like "25" split across runs stay as "25" not "2 5".
+            // Runs within a paragraph are concatenated without spaces so that numbers
+            // split across runs (e.g. "2" + "5") stay joined as "25" not "2 5".
             let text = html_unescape(tok);
             if !text.is_empty() {
                 if in_p_in_cell {
                     para_in_cell.push_str(&text);
                 } else if in_cell {
-                    // Text outside a <p> but inside a <tc> — append to cell directly
                     if !cell_buf.is_empty() { cell_buf.push(' '); }
                     cell_buf.push_str(&text);
                 } else if in_table == 0 {
@@ -249,7 +216,6 @@ fn extract_text_from_xml(xml: &str) -> String {
     parts.join("\n")
 }
 
-/// Decode the handful of XML character references that appear in OOXML.
 fn html_unescape(s: &str) -> String {
     s.replace("&amp;",  "&")
      .replace("&lt;",   "<")
@@ -258,8 +224,7 @@ fn html_unescape(s: &str) -> String {
      .replace("&apos;", "'")
 }
 
-/// Return the local (no-namespace) element name of an XML token.
-/// e.g. `"<w:tr …>"` → `"tr"`,  `"</w:tc>"` → `"tc"`
+/// Returns the local tag name. e.g. `"<w:tr …>"` → `"tr"`
 fn xml_tag_name(tok: &str) -> &str {
     let inner = tok.trim_start_matches('<')
                    .trim_end_matches('>')

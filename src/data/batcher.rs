@@ -1,16 +1,9 @@
-// ============================================================
-// Layer 4 — Q&A Batcher
-// ============================================================
-// In Burn 0.20, Batcher<B, I, O>::batch takes 3 args:
-//   &self, items: Vec<I>, device: &B::Device -> O
-
 use burn::{
     data::dataloader::batcher::Batcher,
     prelude::*,
 };
 use crate::data::dataset::QaSample;
 
-/// A batch of tensors ready for the model forward pass
 #[derive(Debug, Clone)]
 pub struct QaBatch<B: Backend> {
     pub input_ids:       Tensor<B, 2, Int>,
