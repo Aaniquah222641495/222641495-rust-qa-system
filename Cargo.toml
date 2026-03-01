@@ -21,4 +21,7 @@ rand = "0.8"
 zip  = "0.6"
 
 [dev-dependencies]
-burn = { version = "0.20.1" }
+burn = { version = "0.20.1", features = ["test"] }
+
+[patch.crates-io]
+burn = { path = "patches/burn" }
